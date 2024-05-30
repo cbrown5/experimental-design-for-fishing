@@ -1,0 +1,384 @@
+---
+title: "Experimental design for fisheries"
+format: html
+server: shiny
+---
+
+## Shiny Documents
+
+rmarkdown::run("experimental-design.qmd")
+
+```{r setup, include=FALSE}
+
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(plotly)
+theme_set(theme_classic())
+
+#set theme for all ggplots to have larger text
+theme_set(theme_classic(base_size = 20))
+
+calculate_p_value <- function(n, a, b, sd_sets) {
+    
+    effect_sizes <- rep(c(0, b), each = ceiling(n/2))[1:n]
+    catch_rates = rnorm(n, a, sd_sets)
+    dat <- data.frame(set = 1:n, 
+    catch_rate = catch_rates + effect_sizes,
+    treatment = rep(c("control", "treatment"), each = ceiling(n/2))[1:n])
+
+    result <- t.test(catch_rate ~ treatment, data = dat, var.equal = TRUE)
+    return(result$p.value)
+}
+
+calculate_p_value_confounded <- function(n, a, b, sd_sets, p_confounded, time_of_day_effect) {
+    
+effect_sizes <- rep(c(0, b), each = ceiling(n/2))[1:n]
+catch_rates = rnorm(n, a, sd_sets)
+treatment = rep(c("control", "treatment"), each = ceiling(n/2))[1:n]
+time_of_day <- ifelse(treatment == "control", 
+        ifelse(runif(n) < 0.5, 0, time_of_day_effect),
+        ifelse(runif(n) < p_confounded, time_of_day_effect, 0))
+
+dat <- data.frame(set = 1:n, 
+                                  catch_rate = catch_rates + effect_sizes + time_of_day,
+                                  treatment = treatment)
+
+    result <- t.test(catch_rate ~ treatment, data = dat, var.equal = TRUE)
+    result$p.value
+    return(result$p.value)
+}
+
+calculate_p_value_paired <- function(n, a, b, sd_sets, sd_hooks) {
+    
+    catch_rates = rnorm(n, a, sd_sets)
+    error_hook = rnorm(n, 0, sd_hooks)
+    datwide <- data.frame(set = 1:n, 
+        standard = catch_rates,
+        new = catch_rates + error_hook + b)
+    dat <- pivot_longer(datwide, 2:3, names_to = "hook", values_to = "catch_rate")
+
+    result <- t.test(catch_rate ~ hook, data = dat, var.equal = TRUE)
+    result2 <- with(datwide, t.test(new,standard,paired = TRUE))
+    return(c(p_standard = result$p.value, p_paired = result2$p.value))
+}
+
+
+p_values_seq <- seq(0.01, 1, 0.01)
+```
+
+## Inputs and Outputs
+
+You can embed Shiny inputs and outputs in your document. Outputs are automatically updated whenever inputs change. This demonstrates how a standard R plot can be made interactive:
+
+```{r}
+#| panel: sidebar
+numericInput("n", "Sample Size", value = 100)
+numericInput("a", "Mean Catch Rate", value = 10)
+numericInput("b", "Effect Size", value = -0.5)
+numericInput("sd_sets", "Standard Deviation of Sets", value = 4)
+
+```
+
+::: {.panel-tabset}
+
+## Single dataset
+
+```{r}
+actionButton("Simulate_Data", "Simulate Data")
+
+plotOutput("boxplot")
+textOutput("ttest")
+```
+
+
+
+```{r}
+#| context: server
+dat <- eventReactive(input$Simulate_Data, {
+        n <- input$n
+        a <- input$a
+        b <- input$b
+        sd_sets <- input$sd_sets
+
+        effect_sizes <- rep(c(0, b), each = ceiling(n/2))[1:n]
+        catch_rates <- rnorm(n, a, sd_sets)
+
+        data.frame(set = 1:n, 
+                           catch_rate = catch_rates + effect_sizes,
+                           treatment = rep(c("control", "treatment"), each = ceiling(n/2))[1:n])
+})
+
+output$boxplot <- renderPlot({
+
+        ggplot(dat(), aes(x = treatment, y = catch_rate, fill = treatment)) +
+                geom_boxplot() +
+                labs(x = "Catch Rate", y = "Frequency", title = "Boxplot of Catch Rates") 
+})
+
+#text output of a t-test
+
+output$ttest <- renderText({
+        result <- t.test(catch_rate ~ treatment, data = dat(), var.equal = TRUE)
+        paste("P-value: ", signif(result$p.value,2), "\n",
+              "Effect Size: ", signif(-diff(result$estimate),3))
+})
+
+
+  
+```
+
+## Repeat datasets
+
+```{r}
+#Create a new input for simulating lots of data sets
+numericInput("nreps", "Number of datasets", value = 100)
+#action button to simulate
+actionButton("Simulate_Data2", "Simulate datasets")
+
+plotOutput("pvalue_plot")
+plotOutput("power_plot")
+```
+
+
+```{r}
+#| context: server
+
+#Create a reactive expression to simulate the data
+dat2 <- eventReactive(input$Simulate_Data2, {
+        n <- input$n
+        a <- input$a
+        b <- input$b
+        sd_sets <- input$sd_sets
+        nreps <- input$nreps
+
+        p_values <- replicate(nreps, calculate_p_value(n, a, b, sd_sets))
+        data.frame(p_values = p_values)
+}) 
+
+#plot the p-values
+output$pvalue_plot <- renderPlot({
+        ggplot(dat2(), aes(x = p_values)) +
+                geom_histogram(binwidth = 0.05) +
+                labs(x = "P-value", y = "Frequency", title = "Histogram of P-values") +
+                xlim(0, 1)
+})
+
+#plot the power curve
+output$power_plot <- renderPlot({
+       
+        mean_results <- sapply(p_values_seq, function(p) mean(dat2()$p_values < p))
+
+        power_curve <- data.frame(
+                p_value = p_values_seq,
+                power = mean_results
+                )
+
+        ggplot(power_curve) + 
+                aes(x = p_values_seq) +
+                geom_line(aes(y = power)) +
+                labs(x = "Alpha critical (Type I error rate)", y = "Power", title = "Power Curve")
+        })
+
+```
+
+
+## Repeat datasets with different parameters
+
+Input new parameters here, try to just change one thing from the main parameter set, so you can compare the effect on the power curve
+
+```{r}
+numericInput("n3", "Sample Size", value = 100)
+numericInput("a3", "Mean Catch Rate", value = 10)
+numericInput("b3", "Effect Size", value = -0.5)
+numericInput("sd_sets3", "Standard Deviation of Sets", value = 4)
+actionButton("Simulate_Data3", "Simulate datasets")
+
+plotOutput("pvalue_plot3")
+plotOutput("power_plot3")
+```
+
+
+```{r}
+#| context: server
+
+#Create a reactive expression to simulate the data
+dat3 <- eventReactive(input$Simulate_Data3, {
+        n <- input$n
+        a <- input$a
+        b <- input$b
+        sd_sets <- input$sd_sets
+        nreps <- input$nreps
+
+        p_values <- replicate(nreps, calculate_p_value(n, a, b, sd_sets))
+
+        n3 <- input$n3
+        a3 <- input$a3
+        b3 <- input$b3
+        sd_sets3 <- input$sd_sets3
+        p_values3 <- replicate(nreps, calculate_p_value(n3, a3, b3, sd_sets3))
+        
+        data.frame(p_values = c(p_values, p_values3),
+                   Parameter = rep(c("Main", "New"), each = nreps)
+                )
+}) 
+
+#plot the p-values
+output$pvalue_plot3 <- renderPlot({
+        ggplot(dat3(), aes(x = p_values, fill = Parameter)) +
+                geom_histogram(binwidth = 0.05) +
+                facet_wrap(~Parameter) + 
+                labs(x = "P-value", y = "Frequency", title = "Histogram of P-values")  +
+                xlim(0, 1)
+})
+
+#plot the power curve
+output$power_plot3 <- renderPlot({
+       ibase <- dat3()$Parameter == "Main"
+       inew <- dat3()$Parameter == "New"
+        mean_results1 <- sapply(p_values_seq, function(p) mean(dat3()$p_values[ibase] < p))
+        mean_results3 <- sapply(p_values_seq, function(p) mean(dat3()$p_values[inew] < p))
+
+        power_curve <- data.frame(
+                p_value = rep(p_values_seq, 2),
+                power = c(mean_results1, mean_results3),
+                Parameter = rep(c("Main", "New"), each = length(p_values_seq))
+                )
+
+        ggplot(power_curve) + 
+                aes(x = p_value) +
+                geom_line(aes(y = power, color = Parameter)) +
+                geom_vline(xintercept = 0.05, linetype = "dashed") +
+                labs(x = "Alpha critical (Type I error rate)", y = "Power", title = "Power Curve")
+        })
+
+```
+
+
+## Confounding
+
+```{r}
+#Create a new input for simulating lots of data sets
+numericInput("nreps", "Number of datasets", value = 100)
+numericInput("p_confounded", "Probability of applying treatment at night", value = 0.5)
+numericInput("time_of_day_effect", "Night-time effect", value = -4)
+#action button to simulate
+actionButton("Simulate_Data4", "Simulate datasets")
+
+plotOutput("pvalue_plot4")
+plotOutput("power_plot4")
+```
+
+
+```{r}
+#| context: server
+
+#Create a reactive expression to simulate the data
+dat4 <- eventReactive(input$Simulate_Data4, {
+        n <- input$n
+        a <- input$a
+        b <- input$b
+        sd_sets <- input$sd_sets
+        nreps <- input$nreps
+        p_confounded <- input$p_confounded
+        time_of_day_effect <- input$time_of_day_effect
+        p_values <- replicate(nreps, calculate_p_value_confounded(n, a, b, sd_sets,p_confounded, time_of_day_effect))
+        data.frame(p_values = p_values)
+}) 
+
+#plot the p-values
+output$pvalue_plot4 <- renderPlot({
+        ggplot(dat4(), aes(x = p_values)) +
+                geom_histogram(binwidth = 0.05) +
+                labs(x = "P-value", y = "Frequency", title = "Histogram of P-values")  +
+                xlim(0, 1)
+})
+
+#plot the power curve
+output$power_plot4 <- renderPlot({
+       
+        mean_results <- sapply(p_values_seq, function(p) mean(dat4()$p_values < p))
+
+        power_curve <- data.frame(
+                p_value = p_values_seq,
+                power = mean_results
+                )
+
+        ggplot(power_curve) + 
+                aes(x = p_values_seq) +
+                geom_line(aes(y = power)) +
+                labs(x = "Alpha critical (Type I error rate)", y = "Power", title = "Power Curve")
+        })
+
+```
+
+
+## Paired designs
+
+This section uses the main parameters, plus an additional parameter for the standard deviation of the hooks (within sets). 
+
+```{r}
+numericInput("sd_hooks", "Standard Deviation of Hooks", value = 1)
+
+actionButton("Simulate_Data5", "Simulate datasets")
+
+plotOutput("pvalue_plot5")
+plotOutput("power_plot5")
+```
+
+
+```{r}
+#| context: server
+
+#Create a reactive expression to simulate the data
+dat5 <- eventReactive(input$Simulate_Data5, {
+        n <- input$n
+        a <- input$a
+        b <- input$b
+        sd_sets <- input$sd_sets
+        sd_hooks <- input$sd_hooks
+        nreps <- input$nreps
+
+        p_values <- replicate(nreps, calculate_p_value_paired(n, a, b,    sd_sets, sd_hooks))
+
+       return(data.frame(p_values = c(p_values[1,], p_values[2,]),
+                   Design = rep(c("Unpaired", "Paired"), each = nreps)
+                ))
+}) 
+
+#plot the p-values
+output$pvalue_plot5 <- renderPlot({
+        ggplot(dat5(), aes(x = p_values, fill = Design)) +
+                geom_histogram(binwidth = 0.05) +
+                facet_wrap(~Design) + 
+                labs(x = "P-value", y = "Frequency", title = "Histogram of P-values")  +
+                xlim(0, 1)
+})
+
+#plot the power curve
+output$power_plot5 <- renderPlot({
+       ibase <- dat5()$Design == "Unpaired"
+       inew <- dat5()$Design == "Paired"
+        mean_results1 <- sapply(p_values_seq, function(p) mean(dat5()$p_values[ibase] < p))
+        mean_results3 <- sapply(p_values_seq, function(p) mean(dat5()$p_values[inew] < p))
+
+        power_curve <- data.frame(
+                p_value = rep(p_values_seq, 2),
+                power = c(mean_results1, mean_results3),
+                Design = rep(c("Unpaired", "Paired"), each = length(p_values_seq))
+                )
+
+        ggplot(power_curve) + 
+                aes(x = p_value) +
+                geom_line(aes(y = power, color = Design)) +
+                geom_vline(xintercept = 0.05, linetype = "dashed") +
+                labs(x = "Alpha critical (Type I error rate)", y = "Power", title = "Power Curve")
+        })
+
+```
+
+
+
+:::
+
